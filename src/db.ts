@@ -1,6 +1,12 @@
 import { openDB, type DBSchema } from 'idb'
 import type { AnswerDraft, Attempt, Exam } from './types'
 
+export interface DatabaseContents {
+  exams: Exam[]
+  attempts: Attempt[]
+  drafts: AnswerDraft[]
+}
+
 interface ExamMakerDB extends DBSchema {
   exams: {
     key: string
@@ -67,4 +73,31 @@ export async function getDraft(examId: string): Promise<AnswerDraft | undefined>
 
 export async function removeDraft(examId: string): Promise<void> {
   await (await dbPromise).delete('drafts', examId)
+}
+
+export async function readDatabaseContents(): Promise<DatabaseContents> {
+  const db = await dbPromise
+  const [exams, attempts, drafts] = await Promise.all([
+    db.getAll('exams'),
+    db.getAll('attempts'),
+    db.getAll('drafts'),
+  ])
+  return { exams, attempts, drafts }
+}
+
+export async function replaceDatabaseContents(contents: DatabaseContents): Promise<void> {
+  const db = await dbPromise
+  const tx = db.transaction(['exams', 'attempts', 'drafts'], 'readwrite')
+  const examStore = tx.objectStore('exams')
+  const attemptStore = tx.objectStore('attempts')
+  const draftStore = tx.objectStore('drafts')
+  await Promise.all([
+    examStore.clear(),
+    attemptStore.clear(),
+    draftStore.clear(),
+    ...contents.exams.map((exam) => examStore.put(exam)),
+    ...contents.attempts.map((attempt) => attemptStore.put(attempt)),
+    ...contents.drafts.map((draft) => draftStore.put(draft)),
+  ])
+  await tx.done
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
-import { getDraft, listAttempts, listExams, removeDraft, removeExam, saveAttempt, saveDraft, saveExam } from './db'
+import { createBackupJson, parseBackupJson } from './backup'
+import { getDraft, listAttempts, listExams, readDatabaseContents, removeDraft, removeExam, replaceDatabaseContents, saveAttempt, saveDraft, saveExam } from './db'
 import { parsePdf, validateQuestion } from './pdfParser'
 import { PdfCropper } from './PdfCropper'
 import { examTotal, scoreExam } from './scoring'
@@ -23,7 +24,8 @@ function App() {
   const [result, setResult] = useState<Attempt>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
-  const fileRef = useRef<HTMLInputElement>(null)
+  const pdfFileRef = useRef<HTMLInputElement>(null)
+  const backupFileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { void listExams().then(setExams) }, [])
   const selectedExam = exams.find((exam) => exam.id === selectedExamId)
@@ -51,6 +53,57 @@ function App() {
   async function updateExam(updated: Exam) {
     await saveExam(updated)
     setExams((current) => current.map((exam) => exam.id === updated.id ? updated : exam))
+  }
+
+  async function exportBackup() {
+    setBusy(true)
+    setMessage('正在整理題庫、PDF、草稿與成績…')
+    try {
+      const contents = await readDatabaseContents()
+      const json = await createBackupJson(contents)
+      const timestamp = new Date().toISOString().replaceAll(':', '-').replace(/\.\d{3}Z$/, 'Z')
+      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }))
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `exam-king-backup-${timestamp}.json`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 0)
+      setMessage(`完整備份已匯出：${contents.exams.length} 份試卷、${contents.attempts.length} 次作答。`)
+    } catch (reason) {
+      setMessage(reason instanceof Error ? `備份匯出失敗：${reason.message}` : '備份匯出失敗。')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function importBackup(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setBusy(true)
+    setMessage('正在檢查完整備份…')
+    try {
+      const contents = parseBackupJson(await file.text())
+      const confirmed = window.confirm(
+        `備份包含 ${contents.exams.length} 份試卷、${contents.attempts.length} 次作答及 ${contents.drafts.length} 份作答草稿。\n\n繼續後會清除並取代目前瀏覽器中的全部題庫與成績，確定要還原嗎？`,
+      )
+      if (!confirmed) {
+        setMessage('已取消匯入備份，目前資料沒有變更。')
+        return
+      }
+      await replaceDatabaseContents(contents)
+      setExams(await listExams())
+      setSelectedExamId(undefined)
+      setResult(undefined)
+      setScreen('library')
+      setMessage(`備份還原完成：${contents.exams.length} 份試卷、${contents.attempts.length} 次作答。`)
+    } catch (reason) {
+      setMessage(reason instanceof Error ? `備份匯入失敗：${reason.message}` : '備份匯入失敗。')
+    } finally {
+      setBusy(false)
+    }
   }
 
   function openExam(exam: Exam, target: Screen) {
@@ -86,7 +139,9 @@ function App() {
           exams={exams}
           busy={busy}
           message={message}
-          onImport={() => fileRef.current?.click()}
+          onImport={() => pdfFileRef.current?.click()}
+          onExportBackup={() => void exportBackup()}
+          onImportBackup={() => backupFileRef.current?.click()}
           onOpen={openExam}
           onDelete={deleteExam}
         />
@@ -96,16 +151,19 @@ function App() {
       {screen === 'result' && result && <ResultPage attempt={result} onBack={goHome} onRetry={() => selectedExam && openExam(selectedExam, 'take')} onStats={() => setScreen('stats')} />}
       {screen === 'stats' && selectedExam && <StatsPage exam={selectedExam} onBack={goHome} onAttempt={(attempt) => { setResult(attempt); setScreen('result') }} onRetry={() => openExam(selectedExam, 'take')} />}
 
-      <input ref={fileRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" onChange={handleImport} />
+      <input ref={pdfFileRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" onChange={handleImport} />
+      <input ref={backupFileRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importBackup} />
     </div>
   )
 }
 
-function Library({ exams, busy, message, onImport, onOpen, onDelete }: {
+function Library({ exams, busy, message, onImport, onExportBackup, onImportBackup, onOpen, onDelete }: {
   exams: Exam[]
   busy: boolean
   message: string
   onImport: () => void
+  onExportBackup: () => void
+  onImportBackup: () => void
   onOpen: (exam: Exam, screen: Screen) => void
   onDelete: (exam: Exam) => void
 }) {
@@ -117,9 +175,9 @@ function Library({ exams, busy, message, onImport, onOpen, onDelete }: {
           <h1>把公告試題，整理成<br /><em>真正能練習</em>的考卷。</h1>
           <p>答案、單複選與配分自動帶入；附圖與特殊版面由你在原卷上精準框選。所有資料留在本機。</p>
           <button className="button button-primary button-large" onClick={onImport} disabled={busy}>
-            {busy ? '正在解析試卷…' : '匯入 PDF 試卷'}
+            {busy ? '正在處理資料…' : '匯入 PDF 試卷'}
           </button>
-          {message && <div className={`notice ${message.startsWith('匯入失敗') ? 'notice-error' : ''}`}>{message}</div>}
+          {message && <div className={`notice ${message.includes('失敗') ? 'notice-error' : ''}`}>{message}</div>}
         </div>
         <div className="hero-sheet" aria-hidden="true">
           <div className="sheet-header"><span>115</span><span>資訊安全規劃實務</span></div>
@@ -136,7 +194,11 @@ function Library({ exams, busy, message, onImport, onOpen, onDelete }: {
       <section className="library-section">
         <div className="section-title">
           <div><span className="eyebrow">你的題庫</span><h2>{exams.length ? `${exams.length} 份試卷` : '尚未匯入試卷'}</h2></div>
-          {exams.length > 0 && <button className="button" onClick={onImport}>＋ 匯入另一份</button>}
+          <div className="library-actions">
+            {exams.length > 0 && <button className="button" onClick={onImport} disabled={busy}>＋ 匯入另一份</button>}
+            <button className="button" onClick={onExportBackup} disabled={busy || exams.length === 0}>匯出完整備份</button>
+            <button className="button" onClick={onImportBackup} disabled={busy}>匯入備份</button>
+          </div>
         </div>
         {exams.length === 0 ? (
           <button className="empty-library" onClick={onImport}>
