@@ -35,7 +35,7 @@ npm run preview
 
 ## 部署
 
-專案已包含 `vercel.json`。將此資料夾匯入 Vercel 後，以 `npm run build` 建置並發布 `dist` 即可。部署後的資料仍只存在每台裝置自己的瀏覽器，不會跨裝置同步。
+專案同時支援 ChatGPT Sites 與 Vercel。ChatGPT Sites 使用 `.openai/hosting.json` 與 Cloudflare Worker 相容輸出；Vercel 會依 `vercel.json` 執行 `npm run build` 並發布 `dist/client`。部署後的資料仍只存在每台裝置自己的瀏覽器，不會跨裝置同步。
 
 ## 驗證
 

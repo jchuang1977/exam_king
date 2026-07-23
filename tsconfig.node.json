@@ -3,8 +3,11 @@
     "composite": true,
     "noEmit": true,
     "skipLibCheck": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
     "module": "ESNext",
     "moduleResolution": "Bundler"
   },
-  "include": ["vite.config.ts"]
+  "include": ["vite.config.ts", "build/**/*.ts", "worker/**/*.ts"]
 }
