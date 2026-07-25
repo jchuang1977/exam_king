@@ -66,7 +66,11 @@ function removeWatermarkText(text: string): string {
 }
 
 function cleanLine(text: string): string {
-  return text.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim()
+  return text
+    .replace(/[Ａ-Ｄ]/gu, (letter) => letter.normalize('NFKC'))
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .trim()
 }
 
 function isLikelyWatermarkItem(item: TextItemLike): boolean {

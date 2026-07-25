@@ -17,6 +17,49 @@ function answerLabel(values: OptionKey[]) {
   return values.length ? values.sort().join('、') : '未作答'
 }
 
+function ImeSafeTextarea({ value, onValueChange, rows, placeholder }: {
+  value: string
+  onValueChange: (value: string) => void
+  rows: number
+  placeholder: string
+}) {
+  const [draft, setDraft] = useState(value)
+  const focused = useRef(false)
+  const composing = useRef(false)
+
+  useEffect(() => {
+    if (!focused.current && !composing.current) setDraft(value)
+  }, [value])
+
+  return (
+    <textarea
+      rows={rows}
+      value={draft}
+      placeholder={placeholder}
+      onFocus={() => { focused.current = true }}
+      onBlur={(event) => {
+        focused.current = false
+        composing.current = false
+        const next = event.currentTarget.value
+        setDraft(next)
+        onValueChange(next)
+      }}
+      onCompositionStart={() => { composing.current = true }}
+      onCompositionEnd={(event) => {
+        composing.current = false
+        const next = event.currentTarget.value
+        setDraft(next)
+        onValueChange(next)
+      }}
+      onChange={(event) => {
+        const next = event.target.value
+        setDraft(next)
+        if (!composing.current) onValueChange(next)
+      }}
+    />
+  )
+}
+
 function App() {
   const [exams, setExams] = useState<Exam[]>([])
   const [selectedExamId, setSelectedExamId] = useState<string>()
@@ -428,8 +471,8 @@ function ReviewPage({ exam, onChange, onBack, onTake }: { exam: Exam; onChange: 
               return (
                 <div className={`option-edit ${question.correctAnswers.includes(key) ? 'is-correct' : ''}`} key={key}>
                   <button className="answer-toggle" title={`設為正確答案 ${key}`} onClick={() => toggleCorrect(key)}>{question.correctAnswers.includes(key) ? '✓' : key}</button>
-                  <textarea rows={2} value={option?.text ?? ''} placeholder={`選項 ${key} 文字`} onChange={(event) => {
-                    const options = optionKeys.map((optionKey) => ({ key: optionKey, text: optionKey === key ? event.target.value : question.options.find((item) => item.key === optionKey)?.text ?? '' }))
+                  <ImeSafeTextarea key={`${question.id}-${key}`} rows={2} value={option?.text ?? ''} placeholder={`選項 ${key} 文字`} onValueChange={(value) => {
+                    const options = optionKeys.map((optionKey) => ({ key: optionKey, text: optionKey === key ? value : question.options.find((item) => item.key === optionKey)?.text ?? '' }))
                     void patchQuestion({ options })
                   }} />
                 </div>

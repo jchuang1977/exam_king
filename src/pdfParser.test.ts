@@ -254,6 +254,16 @@ describe('PDF parser', () => {
     expect(lines[3]).toMatchObject({ text: '', answerText: '或' })
   })
 
+  it('normalizes full-width answer letters before separating the answer column', () => {
+    const lines = textContentToLines([
+      { str: 'Ａ', width: 6, transform: [1, 0, 0, 1, 72, 760] },
+      { str: '3. (單選題) 第三題', width: 110, transform: [1, 0, 0, 1, 95, 760] },
+      { str: '(A) 第一項', width: 70, transform: [1, 0, 0, 1, 95, 700] },
+    ])
+
+    expect(lines[0]).toMatchObject({ text: '3. (單選題) 第三題', answerText: 'A' })
+  })
+
   it('uses the primary stacked answer set and excludes alternative corrections', () => {
     const exam = parseTextPages([{
       pageNumber: 1,
