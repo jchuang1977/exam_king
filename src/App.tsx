@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { createBackupJson, parseBackupJson } from './backup'
 import { getDraft, listAttempts, listExams, readDatabaseContents, removeDraft, removeExam, replaceDatabaseContents, saveAttempt, saveDraft, saveExam } from './db'
-import { parsePdf, validateQuestion } from './pdfParser'
+import { containsPageHeaderArtifact, parsePdf, validateQuestion } from './pdfParser'
 import { PdfCropper } from './PdfCropper'
 import { examTotal, scoreExam } from './scoring'
 import type { AnswerMap, Attempt, Exam, OptionKey, Question, QuestionType } from './types'
@@ -302,7 +302,11 @@ function ReviewPage({ exam, onChange, onBack, onTake }: { exam: Exam; onChange: 
       const missingSet = new Set(missingNumbers)
       const questions = fresh.questions.map((item) => {
         const existing = existingQuestions.get(item.number)
-        const mustUseFreshText = !existing || missingSet.has(item.number) || missingSet.has(item.number + 1)
+        const freshAnswerUpgrade = Boolean(existing && item.correctAnswers.length > existing.correctAnswers.length)
+        const existingContainsPageHeader = existing
+          ? containsPageHeaderArtifact([existing.prompt, ...existing.options.map((option) => option.text)].join('\n'))
+          : false
+        const mustUseFreshText = !existing || missingSet.has(item.number) || missingSet.has(item.number + 1) || existingContainsPageHeader || freshAnswerUpgrade
         if (mustUseFreshText) {
           return {
             ...item,
@@ -311,14 +315,16 @@ function ReviewPage({ exam, onChange, onBack, onTake }: { exam: Exam; onChange: 
             warningSkipped: false,
           }
         }
+        const keepExistingImage = Boolean(existing.imageDataUrl && existing.imageAutoCropped === false)
+        const imageDataUrl = keepExistingImage ? existing.imageDataUrl : item.imageDataUrl
         return {
           ...existing,
           pageNumber: item.pageNumber,
           sourceRegions: item.sourceRegions,
-          imageDataUrl: existing.imageDataUrl ?? item.imageDataUrl,
-          imageAutoCropped: existing.imageDataUrl ? existing.imageAutoCropped : item.imageAutoCropped,
+          imageDataUrl,
+          imageAutoCropped: keepExistingImage ? false : item.imageAutoCropped,
           points: existing.type === 'single' ? singlePoints : multiplePoints,
-          parseWarnings: validateQuestion({ ...existing, imageDataUrl: existing.imageDataUrl ?? item.imageDataUrl }),
+          parseWarnings: validateQuestion({ ...existing, imageDataUrl }),
           warningSkipped: false,
         }
       })
@@ -441,7 +447,7 @@ function ReviewPage({ exam, onChange, onBack, onTake }: { exam: Exam; onChange: 
           </div>
         </section>
 
-        <PdfCropper pdf={exam.sourcePdf} pageNumber={question.pageNumber} onCrop={(imageDataUrl) => void patchQuestion({ imageDataUrl })} />
+        <PdfCropper pdf={exam.sourcePdf} pageNumber={question.pageNumber} onCrop={(imageDataUrl) => void patchQuestion({ imageDataUrl, imageAutoCropped: false })} />
       </div>
     </main>
   )
@@ -490,7 +496,7 @@ function TakePage({ exam, onBack, onSubmit }: { exam: Exam; onBack: () => void; 
       <div className="question-stack">
         {exam.questions.map((question) => (
           <fieldset className="question-card" key={question.id}>
-            <legend><span>{String(question.number).padStart(2, '0')}</span><div>{question.group && <small>{question.group}</small>}<strong>{question.prompt}</strong></div><em>{question.points} 分</em></legend>
+            <legend><span>{String(question.number).padStart(2, '0')}</span><div>{question.group && <small>{question.group}</small>}<strong>{question.prompt}</strong></div><em><i>{question.type === 'single' ? '單選' : '複選'}</i>{question.points} 分</em></legend>
             {question.imageDataUrl && <img className="question-image" src={question.imageDataUrl} alt={`第 ${question.number} 題附圖`} />}
             <div className="answer-options">
               {question.options.map((option) => {

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
-import { parseTextPages, referencesFigure, textContentToLines, type TextPage } from './pdfParser'
+import { containsPageHeaderArtifact, parseTextPages, referencesFigure, selectQuestionColumnBorders, textContentToLines, type TextPage } from './pdfParser'
 
 describe('PDF parser', () => {
   it('parses the supplied certification exam', async () => {
@@ -66,6 +66,74 @@ describe('PDF parser', () => {
     expect(exam.questions).toHaveLength(2)
     expect(exam.questions[0].options.map((option) => option.text)).toEqual(['第一項', '第二項', '第三項', '第四項'])
     expect(exam.questions[0].sourceRegions?.map((region) => region.pageNumber)).toEqual([1, 2])
+    expect(exam.questions[0].sourceRegions?.every((region) => region.left >= 0.155)).toBe(true)
+    expect(exam.questions[0].sourceRegions?.every((region) => region.left + region.width <= 0.965)).toBe(true)
+  })
+
+  it('splits an answerless next question stuck to option D', () => {
+    const exam = parseTextPages([{
+      pageNumber: 1,
+      width: 595,
+      height: 842,
+      lines: [
+        { text: 'C 1. 第一題', y: 760 },
+        { text: '(A) SOC1', y: 730 },
+        { text: '(B) SOC2', y: 700 },
+        { text: '(C) SOC3', y: 670 },
+        { text: '(D) SOC1及 SOC2 2. 智慧型物聯網設備應遵循何項法案？', y: 640 },
+        { text: '(A) NIS2 Directive', y: 610 },
+        { text: '(B) Cybersecurity Resilience Act', y: 580 },
+        { text: '(C) NIS Directive', y: 550 },
+        { text: '(D) Cybersecurity Act', y: 520 },
+        { text: 'B 3. 第三題', y: 480 },
+        { text: '(A) 一', y: 450 }, { text: '(B) 二', y: 420 }, { text: '(C) 三', y: 390 }, { text: '(D) 四', y: 360 },
+      ],
+    }], '無答案欄題首測試.pdf')
+
+    expect(exam.questions).toHaveLength(3)
+    expect(exam.questions[0].options[3].text).toBe('SOC1及 SOC2')
+    expect(exam.questions[1].number).toBe(2)
+    expect(exam.questions[1].prompt).toBe('智慧型物聯網設備應遵循何項法案？')
+    expect(exam.questions[1].correctAnswers).toEqual([])
+    expect(exam.questions[1].parseWarnings).toContain('尚未設定正確答案')
+  })
+
+  it('removes a certification page header embedded before cross-page options', () => {
+    const exam = parseTextPages([
+      {
+        pageNumber: 1,
+        width: 595,
+        height: 842,
+        lines: [
+          { text: 'AC 1. 關於「身分驗證管理」相關控制措施的敘述，下列哪些正確？', y: 120 },
+        ],
+      },
+      {
+        pageNumber: 2,
+        width: 595,
+        height: 842,
+        lines: [
+          { text: '3 113年度第 1次 資訊安全工程師能力鑑定 中級試題 科目：I21資訊安全規劃實務 卷號：I21-3101 C (A) 使用預設密碼登入系統時，於登入後無需立即變更', y: 760 },
+          { text: 'D (B) 應具備帳戶鎖定機制，例如：帳號登入進行身分驗證失敗達五次後，至少十五分鐘內不允許該帳號繼續嘗試登入', y: 720 },
+          { text: '(C) 應定期審查帳號', y: 680 },
+          { text: '(D) 應停用閒置帳號', y: 640 },
+          { text: 'B 2. 下一題', y: 580 },
+          { text: '(A) 一', y: 540 }, { text: '(B) 二', y: 510 }, { text: '(C) 三', y: 480 }, { text: '(D) 四', y: 450 },
+        ],
+      },
+    ], '113年度測試.pdf')
+
+    expect(exam.questions).toHaveLength(2)
+    expect(exam.questions[0].prompt).toBe('關於「身分驗證管理」相關控制措施的敘述，下列哪些正確？')
+    expect(exam.questions[0].options.map((option) => option.key)).toEqual(['A', 'B', 'C', 'D'])
+    expect(exam.questions[0].options[0].text).toBe('使用預設密碼登入系統時，於登入後無需立即變更')
+    expect(exam.questions[0].options[1].text).toContain('應具備帳戶鎖定機制')
+    expect(JSON.stringify(exam.questions[0])).not.toContain('I21-3101')
+  })
+
+  it('detects page-header contamination in an existing question before reparsing', () => {
+    expect(containsPageHeaderArtifact('題目內容 113年度第 1次 資訊安全工程師能力鑑定 中級試題 科目：I21資訊安全規劃實務 卷號：I21-3101')).toBe(true)
+    expect(containsPageHeaderArtifact('一般題目內容')).toBe(false)
   })
 
   it('splits a question header stuck to the prior option and removes watermark text', () => {
@@ -129,7 +197,8 @@ describe('PDF parser', () => {
 
     expect(lines).toHaveLength(1)
     expect(lines[0].text).toContain('(D) 可靠性衝擊')
-    expect(lines[0].text).toContain('A 3. 第三題')
+    expect(lines[0].text).toContain('3. 第三題')
+    expect(lines[0].answerText).toBe('A')
     expect(lines[0].text).not.toContain('iPAS')
   })
 
@@ -137,5 +206,79 @@ describe('PDF parser', () => {
     expect(referencesFigure('依據下圖所示之結果')).toBe(true)
     expect(referencesFigure('情境如附圖所示')).toBe(true)
     expect(referencesFigure('一般文字題目')).toBe(false)
+  })
+
+  it('uses the second left black border to exclude the answer column', () => {
+    expect(selectQuestionColumnBorders([36, 82, 175, 482, 558], 595, 92, 574)).toEqual({
+      left: 82,
+      right: 558,
+    })
+  })
+
+  it('treats split alternative answers as multiple choice without a prompt marker', () => {
+    const exam = parseTextPages([{
+      pageNumber: 1,
+      width: 595,
+      height: 842,
+      lines: [
+        { text: 'B 1. 下列何者正確？', y: 760 },
+        { text: '或', y: 750 },
+        { text: 'D', y: 740 },
+        { text: '(A) 第一項', y: 710 },
+        { text: '(B) 第二項', y: 680 },
+        { text: '(C) 第三項', y: 650 },
+        { text: '(D) 第四項', y: 620 },
+      ],
+    }], '拆行答案測試.pdf')
+
+    expect(exam.questions[0].prompt).toBe('下列何者正確？')
+    expect(exam.questions[0].correctAnswers).toEqual(['B', 'D'])
+    expect(exam.questions[0].type).toBe('multiple')
+    expect(exam.questions[0].points).toBe(4)
+  })
+
+  it('separates vertically stacked answer-column letters from question text', () => {
+    const lines = textContentToLines([
+      { str: 'B', width: 6, transform: [1, 0, 0, 1, 72, 760] },
+      { str: '3. 下列哪些正確？', width: 110, transform: [1, 0, 0, 1, 95, 760] },
+      { str: 'C', width: 6, transform: [1, 0, 0, 1, 72, 748] },
+      { str: 'D', width: 6, transform: [1, 0, 0, 1, 72, 736] },
+      { str: '或', width: 10, transform: [1, 0, 0, 1, 72, 724] },
+      { str: 'A', width: 6, transform: [1, 0, 0, 1, 72, 712] },
+      { str: '(A) 第一項', width: 70, transform: [1, 0, 0, 1, 95, 700] },
+    ])
+
+    expect(lines[0]).toMatchObject({ text: '3. 下列哪些正確？', answerText: 'B' })
+    expect(lines[1]).toMatchObject({ text: '', answerText: 'C' })
+    expect(lines[2]).toMatchObject({ text: '', answerText: 'D' })
+    expect(lines[3]).toMatchObject({ text: '', answerText: '或' })
+  })
+
+  it('uses the primary stacked answer set and excludes alternative corrections', () => {
+    const exam = parseTextPages([{
+      pageNumber: 1,
+      width: 595,
+      height: 842,
+      lines: [
+        { text: '1. 下列哪些正確？', answerText: 'B', y: 760 },
+        { text: '', answerText: 'C', y: 748 },
+        { text: '', answerText: 'D', y: 736 },
+        { text: '', answerText: '或', y: 724 },
+        { text: '', answerText: 'A', y: 712 },
+        { text: '', answerText: 'B', y: 700 },
+        { text: '', answerText: 'C', y: 688 },
+        { text: '', answerText: 'D', y: 676 },
+        { text: '(A) 第一項', y: 650 },
+        { text: '(B) 第二項', y: 620 },
+        { text: '(C) 第三項', y: 590 },
+        { text: '(D) 第四項', y: 560 },
+      ],
+    }], '答案欄座標測試.pdf')
+
+    expect(exam.questions[0].prompt).toBe('下列哪些正確？')
+    expect(exam.questions[0].correctAnswers).toEqual(['B', 'C', 'D'])
+    expect(exam.questions[0].type).toBe('multiple')
+    expect(exam.questions[0].points).toBe(4)
+    expect(exam.questions[0].options.map((option) => option.text)).toEqual(['第一項', '第二項', '第三項', '第四項'])
   })
 })

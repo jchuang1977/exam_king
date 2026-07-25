@@ -13,6 +13,7 @@ type TextItemLike = {
 export interface TextLine {
   text: string
   y: number
+  answerText?: string
 }
 
 export interface TextPage {
@@ -23,8 +24,13 @@ export interface TextPage {
 }
 
 const optionKeys: OptionKey[] = ['A', 'B', 'C', 'D']
+const questionColumnLeft = 0.155
+const questionColumnRight = 0.965
+const fallbackAnswerColumnMaxX = 65
 const repeatedLinePatterns = [
   /^\s*115\s*年第一次資訊安全工程師.*公告試題.*$/,
+  /^\s*\d{3}\s*年度第\s*\d+\s*次\s+資訊安全工程師能力鑑定\s*(?:初|中|高)級試題\s*$/u,
+  /^\s*科目[：:].*卷號[：:].*$/u,
   /^\s*資訊安全規劃實務\s*$/,
   /^\s*第一科[：:]?\s*$/,
   /^\s*第一科[：:].*資訊安全規劃實務\s*$/,
@@ -33,6 +39,23 @@ const repeatedLinePatterns = [
   /^\s*第\s*\d+\s*頁[，,]\s*共\s*\d+\s*頁\s*$/,
   /^\s*《以下空白》\s*$/,
 ]
+
+const inlineCertificationHeaderPattern = /(?:^|\s)(?:\d{1,3}\s+)?\d{3}\s*年度第\s*\d+\s*次\s+資訊安全工程師能力鑑定\s*(?:初|中|高)級試題\s*科目[：:][^\n]*?\s+卷號[：:]\s*[A-Z0-9-]+(?:\s+[A-D](?=\s*\([A-D]\)))?/gu
+const leadingSubjectHeaderPattern = /^\s*科目[：:][^\n]*?\s+卷號[：:]\s*[A-Z0-9-]+(?:\s+[A-D](?=\s*\([A-D]\)))?\s*/u
+const certificationHeaderArtifactPattern = /\d{3}\s*年度第\s*\d+\s*次\s+資訊安全工程師能力鑑定\s*(?:初|中|高)級試題|科目[：:][^\n]*卷號[：:]/u
+
+export function containsPageHeaderArtifact(text: string): boolean {
+  return certificationHeaderArtifactPattern.test(cleanLine(text))
+}
+
+function removePageHeaderText(text: string): string {
+  return cleanLine(text)
+    .replace(inlineCertificationHeaderPattern, ' ')
+    .replace(leadingSubjectHeaderPattern, '')
+    .replace(/^\s*[A-D]\s+(?=\([A-D]\)\s*)/u, '')
+    .replace(/[ \t]+/g, ' ')
+    .trim()
+}
 
 function removeWatermarkText(text: string): string {
   return text
@@ -67,6 +90,10 @@ function compactText(text: string): string {
     .trim()
 }
 
+function hasCompleteOptionSet(text: string): boolean {
+  return optionKeys.every((key) => new RegExp(`^\\s*\\(${key}\\)`, 'm').test(text))
+}
+
 export function referencesFigure(text: string): boolean {
   return /(附圖|下圖|如下圖|如圖|圖示|圖中|圖所示)/u.test(text)
 }
@@ -82,6 +109,15 @@ export function textContentToLines(items: TextItemLike[]): TextLine[] {
     }))
     .sort((a, b) => Math.abs(b.y - a.y) > 4 ? b.y - a.y : a.x - b.x)
 
+  const questionAnchorXs = usable
+    .filter((item) => /^(?:\d{1,3}[.．]|\([A-D]\))/u.test(cleanLine(item.text)))
+    .map((item) => item.x)
+    .sort((a, b) => a - b)
+  const questionColumnStartX = questionAnchorXs.length
+    ? questionAnchorXs[Math.floor(questionAnchorXs.length / 2)]
+    : fallbackAnswerColumnMaxX + 4
+  const answerColumnMaxX = questionColumnStartX - 4
+
   const rows: Array<{ y: number; items: typeof usable }> = []
   for (const item of usable) {
     const row = rows.find((candidate) => Math.abs(candidate.y - item.y) <= 4)
@@ -93,15 +129,24 @@ export function textContentToLines(items: TextItemLike[]): TextLine[] {
     .sort((a, b) => b.y - a.y)
     .map((row) => {
       const sorted = row.items.sort((a, b) => a.x - b.x)
+      const isAnswerColumnItem = (item: typeof sorted[number]) => {
+        const text = cleanLine(item.text)
+        return item.x <= answerColumnMaxX && /^(?:(?:[A-D]\s*){1,4}|或)$/u.test(text)
+      }
+      const answerText = sorted
+        .filter(isAnswerColumnItem)
+        .map((item) => cleanLine(item.text))
+        .join(' ')
+      const contentItems = sorted.filter((item) => !isAnswerColumnItem(item))
       let text = ''
       let endX = 0
-      sorted.forEach((item, index) => {
+      contentItems.forEach((item, index) => {
         const gap = item.x - endX
         const needsSpace = index > 0 && gap > Math.max(2, item.width / Math.max(item.text.length, 1) * 0.35)
         text += `${needsSpace ? ' ' : ''}${item.text}`
         endX = item.x + item.width
       })
-      return { text: cleanLine(text), y: row.y }
+      return { text: cleanLine(text), y: row.y, answerText: answerText || undefined }
     })
 }
 
@@ -174,25 +219,78 @@ export function parseTextPages(pages: TextPage[], fileName: string): Omit<Exam, 
     startY: number
     content: string
     contentPages: Set<number>
+    awaitingAlternativeAnswer?: boolean
+    ignoringAlternativeAnswerColumn?: boolean
   }> = []
   let current: typeof starts[number] | undefined
   for (const page of pages) {
-    const lines = page.lines.filter((line) => {
-      const text = cleanLine(line.text)
-      return text && !repeatedLinePatterns.some((pattern) => pattern.test(text))
-    })
+    const lines = page.lines
+      .map((line) => ({ ...line, text: removePageHeaderText(line.text) }))
+      .filter((line) => (line.text || line.answerText) && !repeatedLinePatterns.some((pattern) => pattern.test(line.text)))
     for (const sourceLine of lines) {
       const line = cleanLine(sourceLine.text)
       const expectedNumber = starts.length + 1
       const detectionLine = removeWatermarkText(line)
-      const strictStartMatch = detectionLine.match(/^([A-D]{1,4})\s+(\d{1,3})[.．]\s*(.*)$/)
+      const answerColumnText = cleanLine(sourceLine.answerText ?? '')
+      const questionNumberInContent = detectionLine.match(new RegExp(`(^|\\s)(${expectedNumber}[.．]\\s*)`))
+      const primaryAnswerColumnText = answerColumnText.split('或', 1)[0]
+      const primaryColumnAnswers = primaryAnswerColumnText.match(/[A-D]/g)?.join('') ?? ''
+      let detectionLineWithAnswer = detectionLine
+      if (questionNumberInContent && primaryColumnAnswers) {
+        const insertionIndex = (questionNumberInContent.index ?? 0) + questionNumberInContent[1].length
+        detectionLineWithAnswer = `${detectionLine.slice(0, insertionIndex)}${primaryColumnAnswers} ${detectionLine.slice(insertionIndex)}`
+      }
+
+      if (current && answerColumnText && !questionNumberInContent) {
+        if (!current.ignoringAlternativeAnswerColumn) {
+          for (const answer of primaryColumnAnswers) {
+            if (!current.answer.includes(answer)) current.answer += answer
+          }
+        }
+        if (answerColumnText.includes('或')) current.ignoringAlternativeAnswerColumn = true
+        if (!detectionLine) continue
+      }
+      if (current && !/^\s*\(A\)\s*/m.test(current.content)) {
+        if (detectionLine === '或') {
+          current.awaitingAlternativeAnswer = true
+          continue
+        }
+        const alternativeAnswerMatch = detectionLine.match(/^或\s*([A-D])$/u)
+          ?? (current.awaitingAlternativeAnswer ? detectionLine.match(/^([A-D])$/u) : null)
+        if (alternativeAnswerMatch) {
+          const answer = alternativeAnswerMatch[1]
+          if (!current.answer.includes(answer)) current.answer += answer
+          current.awaitingAlternativeAnswer = false
+          continue
+        }
+      }
+      if (current) current.awaitingAlternativeAnswer = false
+      const strictStartMatch = detectionLineWithAnswer.match(/^([A-D]{1,4})\s+(\d{1,3})[.．]\s*(.*)$/)
       const tolerantStartPattern = new RegExp(`^([A-D]{1,4})\\b.{0,24}?\\b(${expectedNumber})[.．]\\s*(.*)$`)
-      const tolerantStartMatch = strictStartMatch ? null : detectionLine.match(tolerantStartPattern)
-      const startMatch = strictStartMatch ?? tolerantStartMatch
+      const tolerantStartMatch = strictStartMatch ? null : detectionLineWithAnswer.match(tolerantStartPattern)
+      const answerStartMatch = strictStartMatch ?? tolerantStartMatch
       const embeddedPattern = new RegExp(`\\s([A-D]{1,4})\\b.{0,24}?\\b(${expectedNumber})[.．]\\s*`)
-      const embeddedMatch = startMatch ? null : detectionLine.match(embeddedPattern)
-      const match = startMatch ?? embeddedMatch
-      if (match) {
+      const embeddedAnswerMatch = answerStartMatch ? null : detectionLineWithAnswer.match(embeddedPattern)
+      const canStartWithoutAnswer = Boolean(current && hasCompleteOptionSet(current.content))
+      const bareStartPattern = new RegExp(`^(${expectedNumber})[.．]\\s+(.+)$`)
+      const bareStartMatch = answerStartMatch || embeddedAnswerMatch || !canStartWithoutAnswer
+        ? null
+        : detectionLine.match(bareStartPattern)
+      const embeddedBarePattern = new RegExp(`\\s(${expectedNumber})[.．]\\s+(.+)$`)
+      const embeddedBareCandidate = answerStartMatch || embeddedAnswerMatch || bareStartMatch
+        ? null
+        : detectionLine.match(embeddedBarePattern)
+      const embeddedBarePrefix = embeddedBareCandidate
+        ? detectionLine.slice(0, embeddedBareCandidate.index).trim()
+        : ''
+      const embeddedBareMatch = embeddedBareCandidate && current
+        && /^\s*\(D\)\s*\S/u.test(embeddedBarePrefix)
+        && hasCompleteOptionSet(`${current.content}\n${embeddedBarePrefix}`)
+        ? embeddedBareCandidate
+        : null
+
+      if (answerStartMatch || embeddedAnswerMatch || bareStartMatch || embeddedBareMatch) {
+        const embeddedMatch = embeddedAnswerMatch ?? embeddedBareMatch
         if (embeddedMatch && current) {
           const before = detectionLine.slice(0, embeddedMatch.index).trim()
           if (before) {
@@ -200,13 +298,21 @@ export function parseTextPages(pages: TextPage[], fileName: string): Omit<Exam, 
             current.contentPages.add(page.pageNumber)
           }
         }
+        const answer = answerStartMatch?.[1] ?? embeddedAnswerMatch?.[1] ?? ''
+        const number = Number(answerStartMatch?.[2] ?? embeddedAnswerMatch?.[2] ?? bareStartMatch?.[1] ?? embeddedBareMatch?.[1])
+        const content = answerStartMatch?.[3]
+          ?? (embeddedAnswerMatch ? detectionLine.slice((embeddedAnswerMatch.index ?? 0) + embeddedAnswerMatch[0].length) : undefined)
+          ?? bareStartMatch?.[2]
+          ?? embeddedBareMatch?.[2]
+          ?? ''
         current = {
-          answer: match[1],
-          number: Number(match[2]),
+          answer,
+          number,
           pageNumber: page.pageNumber,
           startY: sourceLine.y,
-          content: startMatch ? match[3] : detectionLine.slice((embeddedMatch!.index ?? 0) + embeddedMatch![0].length),
+          content,
           contentPages: new Set([page.pageNumber]),
+          ignoringAlternativeAnswerColumn: answerColumnText.includes('或'),
         }
         starts.push(current)
       } else if (current) {
@@ -231,9 +337,9 @@ export function parseTextPages(pages: TextPage[], fileName: string): Omit<Exam, 
         : 0.87
       return {
         pageNumber,
-        left: 0.145,
+        left: questionColumnLeft,
         top,
-        width: Math.min(0.81, (width - width * 0.145) / width),
+        width: Math.min(questionColumnRight - questionColumnLeft, (width - width * questionColumnLeft) / width),
         height: Math.max(0.04, bottom - top),
       }
     })
@@ -288,6 +394,63 @@ function findHorizontalBorder(canvas: HTMLCanvasElement, expectedY: number, left
   return bestRatio > 0.35 ? bestY : expectedY
 }
 
+export function selectQuestionColumnBorders(
+  verticalLines: number[],
+  pageWidth: number,
+  fallbackLeft: number,
+  fallbackRight: number,
+): { left: number; right: number } {
+  const lines = [...verticalLines]
+    .filter((x) => x >= pageWidth * 0.03 && x <= pageWidth * 0.985)
+    .sort((a, b) => a - b)
+  const leftSideLines = lines.filter((x) => x < pageWidth * 0.45)
+  const rightSideLines = lines.filter((x) => x > pageWidth * 0.55)
+  const left = leftSideLines.length >= 2 ? leftSideLines[1] : fallbackLeft
+  const right = rightSideLines.at(-1) ?? fallbackRight
+  return right - left >= pageWidth * 0.45
+    ? { left, right }
+    : { left: fallbackLeft, right: fallbackRight }
+}
+
+function findQuestionColumnBorders(
+  canvas: HTMLCanvasElement,
+  top: number,
+  bottom: number,
+  fallbackLeft: number,
+  fallbackRight: number,
+): { left: number; right: number } {
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) return { left: fallbackLeft, right: fallbackRight }
+  const startX = Math.max(0, Math.round(canvas.width * 0.03))
+  const endX = Math.min(canvas.width - 1, Math.round(canvas.width * 0.985))
+  const startY = Math.max(0, Math.round(top))
+  const endY = Math.min(canvas.height - 1, Math.round(bottom))
+  const scanWidth = Math.max(1, endX - startX + 1)
+  const scanHeight = Math.max(1, endY - startY)
+  const pixels = context.getImageData(startX, startY, scanWidth, scanHeight).data
+  const candidates: Array<{ x: number; ratio: number }> = []
+  for (let column = 0; column < scanWidth; column += 1) {
+    let dark = 0
+    let samples = 0
+    for (let y = 0; y < scanHeight; y += 4) {
+      const offset = (y * scanWidth + column) * 4
+      if (pixels[offset] < 90 && pixels[offset + 1] < 90 && pixels[offset + 2] < 90) dark += 1
+      samples += 1
+    }
+    const ratio = dark / Math.max(1, samples)
+    if (ratio >= 0.45) candidates.push({ x: startX + column, ratio })
+  }
+
+  const grouped: Array<Array<{ x: number; ratio: number }>> = []
+  for (const candidate of candidates) {
+    const group = grouped.at(-1)
+    if (group && candidate.x - group.at(-1)!.x <= 2) group.push(candidate)
+    else grouped.push([candidate])
+  }
+  const verticalLines = grouped.map((group) => group.reduce((best, candidate) => candidate.ratio > best.ratio ? candidate : best).x)
+  return selectQuestionColumnBorders(verticalLines, canvas.width, fallbackLeft, fallbackRight)
+}
+
 async function createQuestionCrop(
   pdfDocument: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>,
   regions: SourceRegion[],
@@ -307,12 +470,17 @@ async function createQuestionCrop(
       await page.render({ canvas: fullPage, canvasContext: context, viewport }).promise
       pageCache.set(region.pageNumber, fullPage)
     }
-    const left = Math.round(region.left * fullPage.width)
-    const right = Math.round((region.left + region.width) * fullPage.width)
+    const expectedLeft = region.left * fullPage.width
+    const expectedRight = (region.left + region.width) * fullPage.width
     const expectedTop = region.top * fullPage.height
     const expectedBottom = (region.top + region.height) * fullPage.height
-    const top = Math.max(0, Math.round(findHorizontalBorder(fullPage, expectedTop, left, right) - 2))
-    const bottom = Math.min(fullPage.height, Math.round(findHorizontalBorder(fullPage, expectedBottom, left, right) + 2))
+    const broadLeft = fullPage.width * 0.03
+    const broadRight = fullPage.width * 0.985
+    const top = Math.max(0, Math.round(findHorizontalBorder(fullPage, expectedTop, broadLeft, broadRight) - 2))
+    const bottom = Math.min(fullPage.height, Math.round(findHorizontalBorder(fullPage, expectedBottom, broadLeft, broadRight) + 2))
+    const borders = findQuestionColumnBorders(fullPage, top, bottom, expectedLeft, expectedRight)
+    const left = Math.max(0, Math.round(borders.left + 1))
+    const right = Math.min(fullPage.width, Math.round(borders.right + 2))
     const piece = document.createElement('canvas')
     piece.width = Math.max(1, right - left)
     piece.height = Math.max(1, bottom - top)
